@@ -8,13 +8,15 @@
 %%%-------------------------------------------------------------------
 -module(ldap_auth).
 -author("dmoore").
--include("couch_db.hrl").
+%% -include("couch_db.hrl").
+-include_lib("couch/include/couch_db.hrl").
 -include_lib("eldap/include/eldap.hrl").
 
 -define(replace(L, K, V), lists:keystore(K, 1, L, {K, V})).
 
 %% API
--export([handle_basic_auth_req/1, handle_admin_role/1]).
+%% -export([handle_basic_auth_req/1, handle_admin_role/1]).
+-export([handle_admin_role/1]).
 -export([handle_session_req/1]).
 %% -export([ldap_authentication_handler/1]).
 %% -export([authenticate/3]).
@@ -42,39 +44,89 @@ config(port) ->
     config:get_integer(?CONFIG_PREFIX, ?PORT_KEY, ?DEFAULT_LDAP_PORT);
 config(base_dn) ->
     config:get(?CONFIG_PREFIX, ?BASE_DN_KEY, ?DEFAULT_BASE_DN);
+
 config(search_user_dn) ->
     "uid=ldapsearch,ou=users,dc=example,dc=com"; % FIXME
 config(search_user_password) ->
     "secret"; % FIXME
-config({user_dn, Uid}) ->
-    DNFormat = "uid=~s,ou=users,dc=example,dc=com", % FIXME
-    lists:flatten(io_lib:format(DNFormat, [Uid]));
-config(group_search_filter) ->
-    eldap:equalityMatch("objectClass", "posixGroup"); % FIXME
-config(group_search_attributes) ->
-    ["memberUid", "description"]; % FIXME
-config(group_search) ->
-    #eldap_search{base=config(base_dn),
-                  filter=config(group_search_filter),
-                  attributes=config(group_search_attributes)};
-config(group_uid_attribute) ->
+
+config(timeout) ->
+    5000; % FIXME
+
+config(group_base_dn) ->
+    "ou=groups,dc=example,dc=com"; % FIXME
+config(group_search_class) ->
+    "posixGroup"; % FIXME
+config(group_member_attribute) ->
     "memberUid"; % FIXME
 config(group_role_attribute) ->
     "description"; % FIXME
-config(password_attribute) ->
+
+config(user_password_attribute) ->
     "userPassword"; % FIXME
-config({user_search_filter, Uid}) ->
-    eldap:equalityMatch("uid", Uid); % FIXME
-config({user_search, Uid}) ->
-    #eldap_search{base=config(base_dn),
-                  filter=config({user_search_filter, Uid}),
-                  attributes=[config(password_attribute)]}; % FIXME
+
+config(user_uid_attribute) ->
+    "uid"; % FIXME
+config(user_base_dn) ->
+    "ou=users,dc=example,dc=com"; % FIXME
+
 config(_) ->
-    throw(unknown_config_key).
+    throw(unknown_config_param).
+
+user_dn(Uid) ->
+    Prefix = io_lib:format("~s=~s,", [config(user_uid_attribute), Uid]),
+    lists:flatten([Prefix, config(user_base_dn)]).
+
+user_search(Uid) ->
+    Filter = eldap:equalityMatch(config(user_uid_attribute), Uid),
+    #eldap_search{base=config(user_base_dn),
+                  filter=Filter,
+                  attributes=[config(user_password_attribute)]}.
+
+group_search() ->
+    %% FIXME to support multiple group search classes
+    Filter = eldap:equalityMatch("objectClass", config(group_search_class)),
+    #eldap_search{base=config(group_base_dn),
+                  filter=Filter,
+                  attributes=[config(group_member_attribute),
+                              config(group_role_attribute)]}.
 
 open() ->
-    Opts = [{port, config(port)}],
+    Opts = [{port, config(port)},
+            {timeout, config(timeout)}],
     eldap:open(config(servers), Opts).
+
+
+authorized_roles(Uid, Password) ->
+    {ok, Handle} = open(),
+    try eldap:simple_bind(Handle, user_dn(Uid), Password) of
+        ok ->
+            case eldap:search(Handle, group_search()) of
+                {ok, #eldap_search_result{entries=Entries}} ->
+                    {ok, roles(Uid, Entries)};
+                Else ->
+                    Else
+            end;
+        Else ->
+            Else
+    after
+        eldap:close(Handle)
+    end.
+
+roles(Uid, Entries) ->
+    roles(Uid, Entries, []).
+
+roles(_Uid, [], Acc) ->
+    [?l2b(R) || R <- lists:usort(Acc)];
+roles(Uid, [#eldap_entry{attributes=Attributes}|Rest], Acc) ->
+    Uids = proplists:get_value(config(group_member_attribute), Attributes),
+    case lists:member(Uid, Uids) of
+        false ->
+            roles(Uid, Rest, Acc);
+        true ->
+            Roles = proplists:get_value(config(group_role_attribute), Attributes),
+            roles(Uid, Rest, Acc ++ Roles)
+    end.
 
 search_user(Uid) ->
     {ok, Handle} = open(),
@@ -82,7 +134,7 @@ search_user(Uid) ->
     Password = config(search_user_password),
     try eldap:simple_bind(Handle, DN, Password) of
         ok ->
-            case eldap:search(Handle, config({user_search, Uid})) of
+            case eldap:search(Handle, user_search(Uid)) of
                 {ok, #eldap_search_result{
                         entries=[#eldap_entry{
                                     attributes=[{_, [EncodedPassword]}]}]}} ->
@@ -96,73 +148,42 @@ search_user(Uid) ->
         eldap:close(Handle)
     end.
 
-auth_roles(Uid, Password) ->
-    {ok, Handle} = open(),
-    try eldap:simple_bind(Handle, config({user_dn, Uid}), Password) of
-        ok ->
-            case eldap:search(Handle, config(group_search)) of
-                {ok, #eldap_search_result{entries=Entries}} ->
-                    {ok, roles(Uid, Entries)};
-                Other ->
-                    Other
-            end;
-        Other ->
-            Other
-    after
-        eldap:close(Handle)
-    end.
-
-roles(Uid, Entries) ->
-    roles(Uid, Entries, []).
-
-roles(_Uid, [], Acc) ->
-    lists:usort(Acc);
-roles(Uid, [#eldap_entry{attributes=Attributes}|Rest], Acc) ->
-    Uids = proplists:get_value(config(group_uid_attribute), Attributes),
-    case lists:member(Uid, Uids) of
-        false ->
-            roles(Uid, Rest, Acc);
-        true ->
-            Roles = proplists:get_value(config(group_role_attribute), Attributes),
-            roles(Uid, Rest, Acc ++ Roles)
-    end.
-
 % many functions in here are taken from or based on things here:
 % https://github.com/davisp/couchdb/blob/5d4ef93048f4aca24bef00fb5b2c13c54c2bbbb3/src/couchdb/couch_httpd_auth.erl
 
-%% ldap_authentication_handler(Req) ->
-%%     case couch_httpd_auth:basic_name_pw(Req) of
-%%         {User, Pass} ->
-%%             couch_log:notice("ldap_authentication_handler ~p:~p", [User, Pass]),
-%%             case authenticate(User, Pass) of
-%%                 {ok, Roles} ->
-%%                     couch_log:notice("ldap_authentication_handler success ~p", [Roles]),
-%%                     Req#httpd{user_ctx = #user_ctx{name = ?l2b(User),
-%%                                                    roles = Roles}};
-%%                 Other ->
-%%                     couch_log:notice("ldap_authentication_handler fail ~p", [Other]),
-%%                     Req
-%%             end;
-%%         _ ->
-%%             Req
-%%     end.
+ldap_authentication_handler(Req) ->
+    case couch_httpd_auth:basic_name_pw(Req) of
+        {User, Pass} ->
+            couch_log:notice("ldap_authentication_handler ~p:~p", [User, Pass]),
+            case authorized_roles(User, Pass) of
+                {ok, Roles} ->
+                    couch_log:notice("ldap_authentication_handler success ~p", [Roles]),
+                    Req#httpd{user_ctx=#user_ctx{name=?l2b(User),
+                                                 roles=Roles}};
+                Other ->
+                    couch_log:notice("ldap_authentication_handler fail ~p", [Other]),
+                    Req
+            end;
+        _ ->
+            Req
+    end.
 
-handle_basic_auth_req(Req) ->
-  case basic_name_pw(Req) of
-    {UserName, Password} ->
-      case authenticate_user(UserName, Password) of
-        {ok, Roles} ->
-          Req#httpd{
-            user_ctx = #user_ctx {
-              name = ?l2b(UserName),
-              roles = Roles
-            }
-          };
-        _ -> Req
-      end;
-    nil ->
-      Req
-  end.
+%% handle_basic_auth_req(Req) ->
+%%   case basic_name_pw(Req) of
+%%     {UserName, Password} ->
+%%       case authenticate_user(UserName, Password) of
+%%         {ok, Roles} ->
+%%           Req#httpd{
+%%             user_ctx = #user_ctx {
+%%               name = ?l2b(UserName),
+%%               roles = Roles
+%%             }
+%%           };
+%%         _ -> Req
+%%       end;
+%%     nil ->
+%%       Req
+%%   end.
 
 handle_admin_role(Req) ->
   % This is a workaround pending a resolution to https://issues.apache.org/jira/browse/COUCHDB-2034
@@ -172,9 +193,9 @@ handle_admin_role(Req) ->
   AuthedReq = run_auth_handlers(Req, Term),
   prepend_admin_role(AuthedReq).
 
-prepend_admin_role(#httpd{ user_ctx = #user_ctx{ name = User, roles = Roles } = UserCtx } = Req) when length(Roles) > 0 ->
+prepend_admin_role(#httpd{ user_ctx = #user_ctx{ name = _User, roles = Roles } = UserCtx } = Req) when length(Roles) > 0 ->
   [SystemAdminRoleName] = get_config(["SystemAdminRoleName"]),
-  ?LOG_DEBUG("Checking for system admin role ~p for user ~p with roles: ~p", [ SystemAdminRoleName, User, Roles ]),
+%%    ?LOG_DEBUG("Checking for system admin role ~p for user ~p with roles: ~p", [ SystemAdm inRoleName, User, Roles ]),
   case lists:member(?l2b(SystemAdminRoleName), Roles) of
     true -> Req#httpd{ user_ctx = UserCtx#user_ctx{ roles = [<<"_admin">>|Roles] } };
     _ -> Req
@@ -189,7 +210,7 @@ run_auth_handlers(Req, [ {Mod, Fun, SpecArg} | Rem]) -> run_auth_handlers(Mod:Fu
 % Login handler with user db
 handle_session_req(#httpd{method='POST', mochi_req=MochiReq}=Req) ->
   {UserName, Password} = get_req_credentials(Req),
-  ?LOG_DEBUG("Attempt Login: ~s",[UserName]),
+  %% ?LOG_DEBUG("Attempt Login: ~s",[UserName]),
   User = case couch_auth_cache:get_user_creds(UserName) of
            nil -> [];
            Result -> Result
@@ -320,7 +341,7 @@ get_req_credentials(#httpd{method='POST', mochi_req=MochiReq}) ->
   {UserName, Password}.
 
 set_user_roles(UserName, Roles) ->
-  ?LOG_INFO("Assigning user ~s roles: ~p", [UserName, Roles]),
+  %% ?LOG_INFO("Assigning user ~s roles: ~p", [UserName, Roles]),
 
   DbName = ?l2b(couch_config:get("couch_httpd_auth", "authentication_db")),
   DbOptions = [{user_ctx, #user_ctx{roles = [<<"_admin">>]}}],
@@ -345,7 +366,7 @@ set_user_roles(UserName, Roles) ->
             }
         end,
 
-  ?LOG_INFO("Assigning _users/~s roles ~p", [DocId, Roles]),
+%%  ?LOG_INFO("Assigning _users/~s roles ~p", [DocId, Roles]),
 
   % disable validation so we can put _admin in the _users db.
   case couch_db:update_doc(AuthDb#db{ validate_doc_funs=[] }, Doc, []) of
@@ -356,15 +377,15 @@ set_user_roles(UserName, Roles) ->
 authenticate_user(_UserName, _Password) when _UserName == <<"">>; _Password == <<"">> ->
   {error, missing_user_name_or_password};
 authenticate_user(UserName, Password) ->
-  ?LOG_INFO("Authenticating user: ~p", [UserName]),
+  %% ?LOG_INFO("Authenticating user: ~p", [UserName]),
   case connect() of
-    {error, Reason} = Error ->
-      ?LOG_ERROR("Could not connect to LDAP. Reason: ~p", [Reason]),
+    {error, _Reason} = Error ->
+%%      ?LOG_ERROR("Could not connect to LDAP. Reason: ~p", [Reason]),
       Error;
     {ok, LdapConnection} ->
       case authenticate(LdapConnection, UserName, Password) of
-        {error, Reason} = Error ->
-          ?LOG_ERROR("Could not authenticate user ~p over LDAP. Reason: ~p", [UserName, Reason]),
+        {error, _Reason} = Error ->
+%%          ?LOG_ERROR("Could not authenticate user ~p over LDAP. Reason: ~p", [UserName, Reason]),
           Error;
         {ok, UserDN} ->
           Groups = get_group_memberships(LdapConnection, UserDN),
@@ -388,6 +409,6 @@ basic_name_pw(Req) ->
           nil
       end;
     _ ->
-      ?LOG_INFO("Could not recognize auth header ~p", [AuthorizationHeader]),
+      %% ?LOG_INFO("Could not recognize auth header ~p", [AuthorizationHeader]),
       nil
   end.
