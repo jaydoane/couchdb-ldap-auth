@@ -1,0 +1,36 @@
+(node1@127.0.0.1)28> timer:tc(eldap,open,[["127.0.0.1"], [{port, 10389}]]).
+{410,{ok,<0.18259.11>}}
+(node1@127.0.0.1)29> timer:tc(eldap,open,[["127.0.0.1"], [{port, 10389}]]).
+{437,{ok,<0.18284.11>}}
+
+(node1@127.0.0.1)2> timer:tc(ldap_auth,open_search,["jay"]).
+{3723,
+ [{eldap_entry,"uid=jay,ou=users,dc=example,dc=com",
+               [{"sn",["Doane"]},
+                {"cn",["Jay"]},
+                {"objectClass",
+                 ["top","inetOrgPerson","person","organizationalPerson"]},
+                {"userPassword",
+                 ["{SSHA}LD//dlTsHd/5zcCiULVhbnn7SCdwny+3U4hvoA=="]},
+                {"uid",["jay"]}]}]}
+(node1@127.0.0.1)3> timer:tc(ldap_auth,open_search,["jay"]).
+{3035,
+ [{eldap_entry,"uid=jay,ou=users,dc=example,dc=com",
+               [{"sn",["Doane"]},
+                {"cn",["Jay"]},
+                {"objectClass",
+                 ["top","inetOrgPerson","person","organizationalPerson"]},
+                {"userPassword",
+                 ["{SSHA}LD//dlTsHd/5zcCiULVhbnn7SCdwny+3U4hvoA=="]},
+                {"uid",["jay"]}]}]}
+
+(node1@127.0.0.1)4> timer:tc(ldap_auth,authenticate,["jay","secret"]).
+{2752,ok}
+(node1@127.0.0.1)5> timer:tc(ldap_auth,authenticate,["jay","secret"]).
+{2253,ok}
+
+(node1@127.0.0.1)9> timer:tc(ldap_auth,auth_roles,["jay","secret"]).
+{4785,["_admin"]}
+(node1@127.0.0.1)8> timer:tc(ldap_auth,auth_roles,["jay","secret"]).
+{4123,["_admin"]}
+

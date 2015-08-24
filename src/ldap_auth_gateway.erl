@@ -61,7 +61,8 @@ connect(DN, Password) ->
   end.
 
 query(LdapConnection, Type, Filter) ->
-  [BaseDN] = get_config(["BaseDN"]),
+  %% [BaseDN] = get_config(["BaseDN"]),
+  BaseDN = "dc=example,dc=com",
   TypedFilter = eldap:'and'([eldap:equalityMatch("objectClass", Type), Filter]),
   case eldap:search(LdapConnection, [{ base, BaseDN }, { filter, TypedFilter }]) of
     {error, Reason} -> throw({search, Reason});
@@ -73,7 +74,8 @@ get_group_memberships(LdapConnection, UserDN) ->
   [ R || {_, R} <- sets:to_list(Memberships)].
 
 get_group_memberships(LdapConnection, Memberships, DN) ->
-  [GroupDNMapAttr] = get_config(["GroupDNMapAttr"]),
+  %% [GroupDNMapAttr] = get_config(["GroupDNMapAttr"]),
+  GroupDNMapAttr = "description",
   case query(LdapConnection, "group", eldap:equalityMatch("member", DN)) of
     [] -> Memberships;
     Entries ->

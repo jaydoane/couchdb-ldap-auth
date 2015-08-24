@@ -9,20 +9,143 @@
 -module(ldap_auth).
 -author("dmoore").
 -include("couch_db.hrl").
+-include_lib("eldap/include/eldap.hrl").
 
 -define(replace(L, K, V), lists:keystore(K, 1, L, {K, V})).
 
 %% API
 -export([handle_basic_auth_req/1, handle_admin_role/1]).
 -export([handle_session_req/1]).
+%% -export([ldap_authentication_handler/1]).
+%% -export([authenticate/3]).
+-compile([export_all]).
 
 -import(couch_httpd, [header_value/2, send_json/2, send_json/4, send_method_not_allowed/2]).
 
 -import(ldap_auth_config, [get_config/1]).
 -import(ldap_auth_gateway, [connect/0, authenticate/3, get_user_dn/2, get_group_memberships/2]).
+%%-import(ldap_auth_gateway, [connect/0, get_user_dn/2, get_group_memberships/2]).
+
+-define(CONFIG_PREFIX, "ldap_auth").
+-define(SERVERS_KEY, "servers").
+-define(PORT_KEY, "port").
+-define(BASE_DN_KEY, "base_dn").
+
+-define(DEFAULT_LDAP_SERVERS, ["127.0.0.1"]).
+-define(DEFAULT_LDAP_PORT, 10389).
+-define(DEFAULT_BASE_DN, "dc=example,dc=com").
+
+
+config(servers) ->
+    config:get(?CONFIG_PREFIX, ?SERVERS_KEY, ?DEFAULT_LDAP_SERVERS);
+config(port) ->
+    config:get_integer(?CONFIG_PREFIX, ?PORT_KEY, ?DEFAULT_LDAP_PORT);
+config(base_dn) ->
+    config:get(?CONFIG_PREFIX, ?BASE_DN_KEY, ?DEFAULT_BASE_DN);
+config(search_user_dn) ->
+    "uid=ldapsearch,ou=users,dc=example,dc=com"; % FIXME
+config(search_user_password) ->
+    "secret"; % FIXME
+config({user_dn, Uid}) ->
+    DNFormat = "uid=~s,ou=users,dc=example,dc=com", % FIXME
+    lists:flatten(io_lib:format(DNFormat, [Uid]));
+config(group_search_filter) ->
+    eldap:equalityMatch("objectClass", "posixGroup"); % FIXME
+config(group_search_attributes) ->
+    ["memberUid", "description"]; % FIXME
+config(group_search) ->
+    #eldap_search{base=config(base_dn),
+                  filter=config(group_search_filter),
+                  attributes=config(group_search_attributes)};
+config(group_uid_attribute) ->
+    "memberUid"; % FIXME
+config(group_role_attribute) ->
+    "description"; % FIXME
+config(password_attribute) ->
+    "userPassword"; % FIXME
+config({user_search_filter, Uid}) ->
+    eldap:equalityMatch("uid", Uid); % FIXME
+config({user_search, Uid}) ->
+    #eldap_search{base=config(base_dn),
+                  filter=config({user_search_filter, Uid}),
+                  attributes=[config(password_attribute)]}; % FIXME
+config(_) ->
+    throw(unknown_config_key).
+
+open() ->
+    Opts = [{port, config(port)}],
+    eldap:open(config(servers), Opts).
+
+search_user(Uid) ->
+    {ok, Handle} = open(),
+    DN = config(search_user_dn),
+    Password = config(search_user_password),
+    try eldap:simple_bind(Handle, DN, Password) of
+        ok ->
+            case eldap:search(Handle, config({user_search, Uid})) of
+                {ok, #eldap_search_result{
+                        entries=[#eldap_entry{
+                                    attributes=[{_, [EncodedPassword]}]}]}} ->
+                    {ok, EncodedPassword};
+                Error ->
+                    Error
+            end;
+        Error ->
+            Error
+    after
+        eldap:close(Handle)
+    end.
+
+auth_roles(Uid, Password) ->
+    {ok, Handle} = open(),
+    try eldap:simple_bind(Handle, config({user_dn, Uid}), Password) of
+        ok ->
+            case eldap:search(Handle, config(group_search)) of
+                {ok, #eldap_search_result{entries=Entries}} ->
+                    {ok, roles(Uid, Entries)};
+                Other ->
+                    Other
+            end;
+        Other ->
+            Other
+    after
+        eldap:close(Handle)
+    end.
+
+roles(Uid, Entries) ->
+    roles(Uid, Entries, []).
+
+roles(_Uid, [], Acc) ->
+    lists:usort(Acc);
+roles(Uid, [#eldap_entry{attributes=Attributes}|Rest], Acc) ->
+    Uids = proplists:get_value(config(group_uid_attribute), Attributes),
+    case lists:member(Uid, Uids) of
+        false ->
+            roles(Uid, Rest, Acc);
+        true ->
+            Roles = proplists:get_value(config(group_role_attribute), Attributes),
+            roles(Uid, Rest, Acc ++ Roles)
+    end.
 
 % many functions in here are taken from or based on things here:
 % https://github.com/davisp/couchdb/blob/5d4ef93048f4aca24bef00fb5b2c13c54c2bbbb3/src/couchdb/couch_httpd_auth.erl
+
+%% ldap_authentication_handler(Req) ->
+%%     case couch_httpd_auth:basic_name_pw(Req) of
+%%         {User, Pass} ->
+%%             couch_log:notice("ldap_authentication_handler ~p:~p", [User, Pass]),
+%%             case authenticate(User, Pass) of
+%%                 {ok, Roles} ->
+%%                     couch_log:notice("ldap_authentication_handler success ~p", [Roles]),
+%%                     Req#httpd{user_ctx = #user_ctx{name = ?l2b(User),
+%%                                                    roles = Roles}};
+%%                 Other ->
+%%                     couch_log:notice("ldap_authentication_handler fail ~p", [Other]),
+%%                     Req
+%%             end;
+%%         _ ->
+%%             Req
+%%     end.
 
 handle_basic_auth_req(Req) ->
   case basic_name_pw(Req) of
