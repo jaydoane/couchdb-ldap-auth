@@ -1,77 +1,64 @@
-%%%-------------------------------------------------------------------
-%%% @author dmoore
-%%% @copyright (C) 2013, <COMPANY>
-%%% @doc
-%%%
-%%% @end
-%%% Created : 13. Oct 2013 6:09 PM
-%%%-------------------------------------------------------------------
 -module(ldap_auth).
--author("dmoore").
-%% -include("couch_db.hrl").
+-author("jdoane@us.ibm.com").
+
 -include_lib("couch/include/couch_db.hrl").
 -include_lib("eldap/include/eldap.hrl").
 
 -define(replace(L, K, V), lists:keystore(K, 1, L, {K, V})).
 
 %% API
-%% -export([handle_basic_auth_req/1, handle_admin_role/1]).
+
 -export([handle_admin_role/1]).
 -export([handle_session_req/1]).
-%% -export([ldap_authentication_handler/1]).
-%% -export([authenticate/3]).
--compile([export_all]).
 
+%% TODO: eliminate imports
 -import(couch_httpd, [header_value/2, send_json/2, send_json/4, send_method_not_allowed/2]).
-
 -import(ldap_auth_config, [get_config/1]).
 -import(ldap_auth_gateway, [connect/0, authenticate/3, get_user_dn/2, get_group_memberships/2]).
-%%-import(ldap_auth_gateway, [connect/0, get_user_dn/2, get_group_memberships/2]).
 
--define(CONFIG_PREFIX, "ldap_auth").
--define(SERVERS_KEY, "servers").
--define(PORT_KEY, "port").
--define(BASE_DN_KEY, "base_dn").
+-compile([export_all]). % FIXME
 
--define(DEFAULT_LDAP_SERVERS, ["127.0.0.1"]).
--define(DEFAULT_LDAP_PORT, 10389).
--define(DEFAULT_BASE_DN, "dc=example,dc=com").
+-define(SECTION, "ldap_auth").
 
+-define(CLASS_ATTRIBUTE, "objectClass").
 
 config(servers) ->
-    config:get(?CONFIG_PREFIX, ?SERVERS_KEY, ?DEFAULT_LDAP_SERVERS);
+    config:get(?SECTION, "servers", ["127.0.0.1"]);
 config(port) ->
-    config:get_integer(?CONFIG_PREFIX, ?PORT_KEY, ?DEFAULT_LDAP_PORT);
-config(base_dn) ->
-    config:get(?CONFIG_PREFIX, ?BASE_DN_KEY, ?DEFAULT_BASE_DN);
-
-config(search_user_dn) ->
-    "uid=ldapsearch,ou=users,dc=example,dc=com"; % FIXME
-config(search_user_password) ->
-    "secret"; % FIXME
-
+    config:get_integer(?SECTION, "port", 10389);
+config(ssl_port) ->
+    config:get_integer(?SECTION, "ssl_port", 10636);
+config(use_ssl) ->
+    list_to_existing_atom(config:get(?SECTION, "use_ssl", "false"));
 config(timeout) ->
-    5000; % FIXME
+    config:get_integer(?SECTION, "timeout", 5000);
+
+config(user_base_dn) ->
+    config:get(?SECTION, "user_base_dn", "ou=users,dc=example,dc=com");
+config(user_uid_attribute) ->
+    config:get(?SECTION, "user_uid_attribute", "uid");
+config(user_password_attribute) ->
+    config:get(?SECTION, "user_password_attribute", "userPassword");
 
 config(group_base_dn) ->
-    "ou=groups,dc=example,dc=com"; % FIXME
+    config:get(?SECTION, "group_base_dn", "ou=groups,dc=example,dc=com");
 config(group_search_class) ->
-    "posixGroup"; % FIXME
+    config:get(?SECTION, "group_search_class", "posixGroup");
 config(group_member_attribute) ->
-    "memberUid"; % FIXME
+    config:get(?SECTION, "group_member_attribute", "memberUid");
 config(group_role_attribute) ->
-    "description"; % FIXME
+    config:get(?SECTION, "group_role_attribute", "description");
 
-config(user_password_attribute) ->
-    "userPassword"; % FIXME
-
-config(user_uid_attribute) ->
-    "uid"; % FIXME
-config(user_base_dn) ->
-    "ou=users,dc=example,dc=com"; % FIXME
+%% search_user hopefully unnecessary...
+config(search_user_dn) ->
+    config:get(?SECTION, "search_user_dn",
+               "uid=ldapsearch,ou=users,dc=example,dc=com");
+config(search_user_password) ->
+    config:get(?SECTION, "search_user_password", "secret");
 
 config(_) ->
     throw(unknown_config_param).
+
 
 user_dn(Uid) ->
     Prefix = io_lib:format("~s=~s,", [config(user_uid_attribute), Uid]),
@@ -85,15 +72,21 @@ user_search(Uid) ->
 
 group_search() ->
     %% FIXME to support multiple group search classes
-    Filter = eldap:equalityMatch("objectClass", config(group_search_class)),
+    Filter = eldap:equalityMatch(?CLASS_ATTRIBUTE, config(group_search_class)),
     #eldap_search{base=config(group_base_dn),
                   filter=Filter,
                   attributes=[config(group_member_attribute),
                               config(group_role_attribute)]}.
 
 open() ->
-    Opts = [{port, config(port)},
-            {timeout, config(timeout)}],
+    BaseOpts = [{timeout, config(timeout)}],
+    Opts = case config(use_ssl) of
+               true ->
+                   [{ssl, true},
+                    {port, config(ssl_port)}];
+               false ->
+                   [{port, config(port)}]
+           end ++ BaseOpts,
     eldap:open(config(servers), Opts).
 
 
@@ -117,7 +110,7 @@ roles(Uid, Entries) ->
     roles(Uid, Entries, []).
 
 roles(_Uid, [], Acc) ->
-    [?l2b(R) || R <- lists:usort(Acc)];
+    [fixup(R) || R <- lists:usort(Acc)];
 roles(Uid, [#eldap_entry{attributes=Attributes}|Rest], Acc) ->
     Uids = proplists:get_value(config(group_member_attribute), Attributes),
     case lists:member(Uid, Uids) of
@@ -127,6 +120,11 @@ roles(Uid, [#eldap_entry{attributes=Attributes}|Rest], Acc) ->
             Roles = proplists:get_value(config(group_role_attribute), Attributes),
             roles(Uid, Rest, Acc ++ Roles)
     end.
+
+fixup("server_admin") ->
+    server_admin;
+fixup(Role) when is_list(Role) ->
+    ?l2b(Role).
 
 search_user(Uid) ->
     {ok, Handle} = open(),
@@ -148,16 +146,14 @@ search_user(Uid) ->
         eldap:close(Handle)
     end.
 
-% many functions in here are taken from or based on things here:
-% https://github.com/davisp/couchdb/blob/5d4ef93048f4aca24bef00fb5b2c13c54c2bbbb3/src/couchdb/couch_httpd_auth.erl
-
 ldap_authentication_handler(Req) ->
     case couch_httpd_auth:basic_name_pw(Req) of
         {User, Pass} ->
             couch_log:notice("ldap_authentication_handler ~p:~p", [User, Pass]),
             case authorized_roles(User, Pass) of
                 {ok, Roles} ->
-                    couch_log:notice("ldap_authentication_handler success ~p", [Roles]),
+                    couch_log:notice("ldap_authentication_handler success, roles ~p",
+                                     [Roles]),
                     Req#httpd{user_ctx=#user_ctx{name=?l2b(User),
                                                  roles=Roles}};
                 Other ->
@@ -167,6 +163,9 @@ ldap_authentication_handler(Req) ->
         _ ->
             Req
     end.
+
+% many functions in here are taken from or based on things here:
+% https://github.com/davisp/couchdb/blob/5d4ef93048f4aca24bef00fb5b2c13c54c2bbbb3/src/couchdb/couch_httpd_auth.erl
 
 %% handle_basic_auth_req(Req) ->
 %%   case basic_name_pw(Req) of
