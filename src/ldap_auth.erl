@@ -1,14 +1,10 @@
 -module(ldap_auth).
 
--include_lib("couch/include/couch_db.hrl").
-
-%% API
-
 -export([default_authentication_handler/1,
          cookie_authentication_handler/1,
          handle_session_req/1]).
 
-%% -compile([export_all]). % FIXME
+-include_lib("couch/include/couch_db.hrl").
 
 -define(SESSION_COOKIE, "LDAPAuthSession").
 -define(TIMESTAMP_ENCODE_BASE, 16).
@@ -118,9 +114,12 @@ encode_role(Bin) when is_binary(Bin) ->
 
 
 decode_roles(RolesStr) ->
-    [ldap_interface:fixup_role(Role)
-     || Role <- re:split(RolesStr, ",", [{return, list}])].
+    [decode_role(Role) || Role <- re:split(RolesStr, ",", [{return, list}])].
 
+decode_role("server_admin") ->
+    server_admin;
+decode_role(Role) when is_list(Role) ->
+    ?l2b(Role).
 
 encode_timestamp(Timestamp) ->
     integer_to_list(Timestamp, ?TIMESTAMP_ENCODE_BASE).

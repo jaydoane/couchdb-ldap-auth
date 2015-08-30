@@ -97,7 +97,7 @@ roles(Uid, Entries) ->
     roles(Uid, Entries, []).
 
 roles(_Uid, [], Acc) ->
-    [fixup_role(Role) || Role <- lists:usort(Acc)];
+    [ldap_auth:decode_role(Role) || Role <- lists:usort(Acc)];
 roles(Uid, [#eldap_entry{attributes=Attributes}|Rest], Acc) ->
     Uids = proplists:get_value(config(group_member_attribute), Attributes),
     case lists:member(Uid, Uids) of
@@ -107,11 +107,6 @@ roles(Uid, [#eldap_entry{attributes=Attributes}|Rest], Acc) ->
             Roles = proplists:get_value(config(group_role_attribute), Attributes),
             roles(Uid, Rest, Acc ++ Roles)
     end.
-
-fixup_role("server_admin") ->
-    server_admin;
-fixup_role(Role) when is_list(Role) ->
-    list_to_binary(Role).
 
 search_user(Uid) ->
     {ok, Handle} = open(),
