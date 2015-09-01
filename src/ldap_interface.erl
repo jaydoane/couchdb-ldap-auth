@@ -16,7 +16,7 @@ config(port) ->
 config(ssl_port) ->
     config:get_integer(?SECTION, "ssl_port", 10636);
 config(use_ssl) ->
-    list_to_existing_atom(config:get(?SECTION, "use_ssl", "false"));
+    config:get_boolean(?SECTION, "use_ssl", false);
 config(connect_timeout) ->
     config:get_integer(?SECTION, "timeout", 5000);
 

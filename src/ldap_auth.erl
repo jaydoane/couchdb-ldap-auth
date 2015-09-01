@@ -71,7 +71,12 @@ handle_session_req(#httpd{method='POST'}=Req) ->
             Json = {[{error, unauthorized},
                      {reason, <<"Name or password is incorrect.">>}]},
             couch_httpd:send_json(Req, 401, [Header], Json)
-    end.
+    end;
+handle_session_req(#httpd{method='DELETE'}=Req) ->
+    Header = clear_session_header(Req),
+    couch_httpd:send_json(Req, 200, [Header], {[{ok, true}]});
+handle_session_req(Req) ->
+    couch_httpd_auth:handle_session_req(Req).
 
 
 session_header(Req, Username, Roles) ->
